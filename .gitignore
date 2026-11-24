@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.db
+*.db-*
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Terraform : jamais d'état ni de variables locales dans Git
+infra/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
+
+# Rapports
+*.sarif
+zap-report.*
+gitleaks.json

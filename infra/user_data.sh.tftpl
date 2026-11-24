@@ -1,0 +1,104 @@
+#!/bin/bash
+# Amorçage de l'instance (cloud-init). Aucun secret ici : ils sont lus dans SSM au démarrage.
+set -euo pipefail
+
+dnf -y upgrade --security || true
+dnf -y install docker
+systemctl enable --now docker
+
+install -d -m 0750 /opt/${project}
+install -d -m 0700 -o 10001 -g 10001 /opt/${project}/data
+
+# ---- Reverse proxy Caddy : HTTPS automatique (Let's Encrypt) + en-têtes ----
+cat > /opt/${project}/Caddyfile <<'CADDY'
+{
+%{ if acme_email != "" ~}
+	email ${acme_email}
+%{ endif ~}
+	admin off
+}
+
+${domain} {
+	encode gzip
+	reverse_proxy app:8080
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+	log {
+		output stdout
+	}
+}
+CADDY
+
+# ---- Script de déploiement (appelé au démarrage et par la pipeline via SSM) ----
+cat > /opt/${project}/deploy.sh <<'DEPLOY'
+#!/bin/bash
+set -euo pipefail
+REGION="${region}"
+REPO="${repo_url}"
+TAG=$(aws ssm get-parameter --region "$REGION" --with-decryption --name "/${project}/image_tag" \
+      --query Parameter.Value --output text)
+if [ "$TAG" = "none" ]; then echo "Aucune image publiée pour l'instant"; exit 0; fi
+
+aws ecr get-login-password --region "$REGION" \
+  | docker login --username AWS --password-stdin "${registry}"
+docker pull "$REPO:$TAG"
+
+SECRET_KEY=$(aws ssm get-parameter --region "$REGION" --with-decryption \
+      --name "/${project}/secret_key" --query Parameter.Value --output text)
+export SECRET_KEY
+
+docker network inspect ${project} >/dev/null 2>&1 || docker network create ${project}
+
+# Conteneur applicatif durci : FS en lecture seule, aucune capability, limites de ressources
+docker rm -f app >/dev/null 2>&1 || true
+docker run -d --name app --network ${project} --restart unless-stopped \
+  --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+  --cap-drop ALL --security-opt no-new-privileges:true \
+  --memory 512m --cpus 1 --pids-limit 200 \
+  -e SECRET_KEY \
+  -v /opt/${project}/data:/data \
+  "$REPO:$TAG"
+
+# Attente de l'état "healthy" (HEALTHCHECK du Dockerfile)
+for _ in $(seq 1 30); do
+  STATUS=$(docker inspect -f '{{.State.Health.Status}}' app)
+  [ "$STATUS" = "healthy" ] && break
+  sleep 2
+done
+echo "Etat de l'application : $STATUS"
+[ "$STATUS" = "healthy" ]
+
+if ! docker ps --format '{{.Names}}' | grep -qx caddy; then
+  docker rm -f caddy >/dev/null 2>&1 || true
+  docker run -d --name caddy --network ${project} --restart unless-stopped \
+    -p 80:80 -p 443:443 \
+    --cap-drop ALL --cap-add NET_BIND_SERVICE --security-opt no-new-privileges:true \
+    --memory 128m \
+    -v /opt/${project}/Caddyfile:/etc/caddy/Caddyfile:ro \
+    -v caddy_data:/data -v caddy_config:/config \
+    "${caddy_image}"
+fi
+docker image prune -f >/dev/null
+DEPLOY
+chmod 0700 /opt/${project}/deploy.sh
+
+# ---- Service systemd : redéploie l'application à chaque démarrage ----
+cat > /etc/systemd/system/${project}.service <<UNIT
+[Unit]
+Description=Deploiement ${project}
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/${project}/deploy.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now ${project}.service

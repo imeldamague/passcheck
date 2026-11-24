@@ -1,0 +1,6 @@
+body{font-family:system-ui,sans-serif;max-width:640px;margin:3rem auto;padding:0 1rem;color:#1f2933;line-height:1.5}
+nav a{margin-right:1rem}
+label{display:block;margin-top:1rem;font-weight:600}
+input{width:100%;padding:.5rem;margin-top:.25rem;box-sizing:border-box}
+button{margin-top:1.25rem;padding:.55rem 1.2rem;cursor:pointer}
+.error{color:#b42318}.ok{color:#067647}.flash{background:#ecfdf3;padding:.5rem 1rem}

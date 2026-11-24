@@ -1,0 +1,10 @@
+# Configuration Gitleaks : règles par défaut + exceptions justifiées
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Listes publiques SecLists (mots de passe courants, pas des secrets) et jeux de test"
+paths = [
+  '''app/wordlists/.*\.txt''',
+  '''tests/.*\.py''',
+]

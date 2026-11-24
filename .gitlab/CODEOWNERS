@@ -1,0 +1,11 @@
+# Revue obligatoire du référent sécurité sur les fichiers sensibles
+# (remplacer par les identifiants GitLab de l'équipe)
+[Securite]
+/infra/                @AboubakaryTest
+/.gitlab-ci.yml        @AboubakaryTest
+/Dockerfile            @AboubakaryTest
+/app/passwords.py      @AboubakaryTest
+/.gitleaks.toml        @AboubakaryTest
+
+[Application]
+/app/                  @AboubakaryTest

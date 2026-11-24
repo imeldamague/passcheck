@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Créer un compte{% endblock %}
+{% block content %}
+<h1>Créer un compte</h1>
+{% for e in errors or [] %}<p class="error">{{ e }}</p>{% endfor %}
+<form method="post" action="{{ url_for('register') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <label for="username">Identifiant</label>
+  <input id="username" name="username" value="{{ username or '' }}" maxlength="32" required autocomplete="username">
+  <label for="password">Mot de passe (12 caractères minimum)</label>
+  <input type="password" id="password" name="password" minlength="12" maxlength="128" required autocomplete="new-password">
+  <label for="confirm">Confirmation</label>
+  <input type="password" id="confirm" name="confirm" minlength="12" maxlength="128" required autocomplete="new-password">
+  <button type="submit">Créer le compte</button>
+</form>
+{% endblock %}

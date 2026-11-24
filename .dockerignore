@@ -1,0 +1,13 @@
+.git
+.gitlab-ci.yml
+**/__pycache__
+**/*.pyc
+.pytest_cache
+tests/
+infra/
+docs/
+_original_app/
+README.md
+CONTRIBUTING.md
+.env
+*.db

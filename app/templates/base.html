@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}PassCheck{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <nav>
+    <a href="{{ url_for('index') }}">Accueil</a>
+    <a href="{{ url_for('password') }}">Tester un mot de passe</a>
+    {% if session.get('user') %}
+      <a href="{{ url_for('account') }}">Mon compte</a>
+    {% else %}
+      <a href="{{ url_for('register') }}">Créer un compte</a>
+      <a href="{{ url_for('login') }}">Connexion</a>
+    {% endif %}
+  </nav>
+  {% for msg in get_flashed_messages() %}<p class="flash">{{ msg }}</p>{% endfor %}
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>

@@ -1,0 +1,344 @@
+# =====================================================================
+#  PassCheck - Pipeline DevSecOps
+#  lint -> secrets -> SAST -> SCA -> tests -> IaC -> build -> test image
+#  -> scan image -> (main) infra -> publication ECR -> déploiement
+#  -> smoke test -> DAST
+#  Chaque outil de sécurité est BLOQUANT (pas de allow_failure), sauf mention.
+# =====================================================================
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never                                   # évite les pipelines en double
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+stages:
+  - lint
+  - security
+  - test
+  - build
+  - image-test
+  - image-scan
+  - infra
+  - publish
+  - deploy
+  - verify
+
+variables:
+  IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+  PYTHON_IMAGE: python:3.12-slim-bookworm
+  TRIVY_IMAGE: aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+  TF_ROOT: infra
+  TF_STATE_NAME: production
+  TF_HTTP_ADDRESS: ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/${TF_STATE_NAME}
+  TF_HTTP_LOCK_ADDRESS: ${TF_HTTP_ADDRESS}/lock
+  TF_HTTP_UNLOCK_ADDRESS: ${TF_HTTP_ADDRESS}/lock
+  TF_HTTP_LOCK_METHOD: POST
+  TF_HTTP_UNLOCK_METHOD: DELETE
+  TF_HTTP_USERNAME: gitlab-ci-token
+  TF_HTTP_PASSWORD: ${CI_JOB_TOKEN}
+  TF_HTTP_RETRY_WAIT_MIN: "5"
+  # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN / AWS_DEFAULT_REGION :
+  # variables CI/CD "Protected" + "Masked" (jamais dans le dépôt).
+
+.on_main: &on_main
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+.docker: &docker
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+
+# ----------------------------- LINT ----------------------------------
+flake8:
+  stage: lint
+  image: $PYTHON_IMAGE
+  script:
+    - pip install --quiet flake8
+    - flake8 app tests
+
+hadolint:
+  stage: lint
+  image: hadolint/hadolint:v2.12.0-debian
+  script:
+    - hadolint --failure-threshold warning Dockerfile
+
+wordlists_integrity:
+  stage: lint
+  image: $PYTHON_IMAGE
+  script:
+    - cd app/wordlists && sha256sum -c SHA256SUMS      # intégrité des listes embarquées
+
+terraform_validate:
+  stage: lint
+  image:
+    name: hashicorp/terraform:1.9.8
+    entrypoint: [""]
+  script:
+    - cd $TF_ROOT
+    - terraform fmt -check -recursive -diff || echo "Formatage a revoir (non bloquant)"
+    - terraform init -backend=false -input=false
+    - terraform validate
+
+# --------------------------- SECURITY --------------------------------
+gitleaks:
+  stage: security
+  image:
+    name: zricethezav/gitleaks:v8.21.2
+    entrypoint: [""]
+  variables:
+    GIT_DEPTH: "0"                                   # tout l'historique
+  script:
+    - gitleaks detect --source . --redact --verbose --report-format json --report-path gitleaks.json
+  artifacts:
+    when: always
+    paths: [gitleaks.json]
+    expire_in: 1 week
+
+bandit:
+  stage: security
+  image: $PYTHON_IMAGE
+  script:
+    - pip install --quiet bandit
+    - bandit -r app -f txt
+  # B104/B113 de l'application d'origine corrigés : aucun résultat attendu
+
+semgrep:
+  stage: security
+  image: semgrep/semgrep:1.185.0
+  variables:
+    SEMGREP_SEND_METRICS: "off"
+  script:
+    - >
+      semgrep scan --error
+      --config p/python --config p/flask --config p/secrets --config p/dockerfile
+      --exclude _original_app
+      --junit-xml-output=semgrep.xml --json-output=semgrep.json .
+  artifacts:
+    when: always
+    paths: [semgrep.json]
+    reports:
+      junit: semgrep.xml
+    expire_in: 1 week
+
+pip_audit:
+  stage: security
+  image: $PYTHON_IMAGE
+  script:
+    - pip install --quiet pip-audit
+    - pip-audit -r requirements.txt --strict
+
+trivy_fs:
+  stage: security
+  image:
+    name: $TRIVY_IMAGE
+    entrypoint: [""]
+  script:
+    # misconfig (IaC/Dockerfile) est couvert par Checkov, avec exceptions justifiées
+    - trivy fs --scanners vuln,secret --skip-dirs _original_app --skip-dirs app/wordlists
+        --severity HIGH,CRITICAL --exit-code 1 .
+
+checkov:
+  stage: security
+  image:
+    name: bridgecrew/checkov:3.2.34
+    entrypoint: [""]
+  script:
+    - >
+      checkov -d . --framework terraform,dockerfile,gitlab_ci
+      --skip-path _original_app --compact
+      --output cli --output junitxml --output-file-path console,checkov.xml
+  artifacts:
+    when: always
+    reports:
+      junit: checkov.xml
+    expire_in: 1 week
+
+# ----------------------------- TESTS ---------------------------------
+pytest:
+  stage: test
+  image: $PYTHON_IMAGE
+  script:
+    - pip install --quiet -r requirements-dev.txt
+    - python -m pytest --junitxml=pytest.xml
+  artifacts:
+    when: always
+    reports:
+      junit: pytest.xml
+
+# ----------------------------- BUILD ---------------------------------
+build_image:
+  <<: *docker
+  stage: build
+  script:
+    - docker build --pull
+        --label org.opencontainers.image.revision=$CI_COMMIT_SHA
+        --label org.opencontainers.image.source=$CI_PROJECT_URL
+        -t "$IMAGE" .
+    - docker push "$IMAGE"
+
+# -------------------- VALIDATION DE L'IMAGE ---------------------------
+image_functional_test:
+  <<: *docker
+  stage: image-test
+  script:
+    - docker pull "$IMAGE"
+    # Lancement avec les MÊMES restrictions qu'en production
+    - docker run -d --name app -p 8080:8080
+        --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true
+        -e SECRET_KEY="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+        "$IMAGE"
+    - for i in $(seq 1 30); do wget -qO- http://docker:8080/health && break; sleep 2; done
+    - wget -qO- http://docker:8080/health | grep -q '"ok"'
+    - wget -qO- http://docker:8080/password | grep -q 'type="password"'
+    - wget -S -qO /dev/null http://docker:8080/ 2>&1 | grep -qi "content-security-policy"
+    # L'image doit tourner en non-root
+    - test "$(docker inspect -f '{{.Config.User}}' "$IMAGE")" = "10001:10001"
+    - test "$(docker exec app id -u)" = "10001"
+    - test "$(docker inspect -f '{{.State.Health.Status}}' app)" != "unhealthy"
+  after_script:
+    - docker logs app || true
+
+image_scan:
+  stage: image-scan
+  image:
+    name: $TRIVY_IMAGE
+    entrypoint: [""]
+  variables:
+    TRIVY_USERNAME: $CI_REGISTRY_USER
+    TRIVY_PASSWORD: $CI_REGISTRY_PASSWORD
+  script:
+    # SBOM (inventaire des composants, exigé par le Cyber Resilience Act)
+    - trivy image --format cyclonedx --output sbom.cdx.json "$IMAGE"
+    # Quality gate : aucune vulnérabilité HIGH/CRITICAL corrigeable
+    - trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
+  artifacts:
+    when: always
+    paths: [sbom.cdx.json]
+    expire_in: 30 days
+
+# ------------------------ INFRA (main uniquement) ----------------------
+.terraform: &terraform
+  image:
+    name: hashicorp/terraform:1.9.8
+    entrypoint: [""]
+  before_script:
+    - cd $TF_ROOT
+    - terraform init -input=false
+
+infra_plan:
+  <<: [*terraform, *on_main]
+  stage: infra
+  script:
+    - terraform plan -input=false -lock-timeout=60s
+
+infra_apply:
+  <<: *terraform
+  stage: infra
+  needs: [infra_plan, image_scan, image_functional_test]
+  environment:
+    name: production
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual                                  # validation humaine avant prod
+  allow_failure: false
+  script:
+    - terraform apply -input=false -auto-approve -lock-timeout=60s
+    - echo "APP_URL=$(terraform output -raw app_url)" > ../deploy.env
+    - echo "INSTANCE_ID=$(terraform output -raw instance_id)" >> ../deploy.env
+    - echo "ECR_URL=$(terraform output -raw ecr_repository_url)" >> ../deploy.env
+  artifacts:
+    reports:
+      dotenv: deploy.env
+
+# ------------------- PUBLICATION ET DÉPLOIEMENT ------------------------
+publish_ecr:
+  <<: [*docker, *on_main]
+  stage: publish
+  needs: [infra_apply]
+  script:
+    - apk add --no-cache aws-cli
+    - docker pull "$IMAGE"
+    - aws ecr get-login-password | docker login --username AWS --password-stdin "${ECR_URL%%/*}"
+    - |
+      if aws ecr describe-images --repository-name "${ECR_URL##*/}" \
+           --image-ids imageTag="$CI_COMMIT_SHORT_SHA" >/dev/null 2>&1; then
+        echo "Tag deja publie (ECR immuable)"
+      else
+        docker tag "$IMAGE" "$ECR_URL:$CI_COMMIT_SHORT_SHA"
+        docker push "$ECR_URL:$CI_COMMIT_SHORT_SHA"
+      fi
+
+deploy_app:
+  <<: *on_main
+  stage: deploy
+  needs: [infra_apply, publish_ecr]
+  image:
+    name: amazon/aws-cli:2.22.0
+    entrypoint: [""]
+  environment:
+    name: production
+    url: $APP_URL
+  script:
+    - aws ssm put-parameter --name /passcheck/image_tag --type SecureString
+        --key-id alias/passcheck --overwrite --value "$CI_COMMIT_SHORT_SHA"
+    # Déploiement via SSM Run Command : aucun accès SSH nécessaire
+    - CMD_ID=$(aws ssm send-command --instance-ids "$INSTANCE_ID"
+        --document-name AWS-RunShellScript
+        --comment "deploy $CI_COMMIT_SHORT_SHA"
+        --parameters commands=/opt/passcheck/deploy.sh
+        --query Command.CommandId --output text)
+    - aws ssm wait command-executed --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" || true
+    - aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID"
+        --query '[Status,StandardOutputContent]' --output text
+    - test "$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query Status --output text)" = "Success"
+
+# ----------------------------- VERIFY ---------------------------------
+smoke_test:
+  <<: *on_main
+  stage: verify
+  needs: [deploy_app, infra_apply]
+  image: curlimages/curl:8.11.0
+  script:
+    # Le premier certificat Let's Encrypt peut prendre ~1 min
+    - for i in $(seq 1 30); do curl -fsS "$APP_URL/health" && break; sleep 5; done
+    - curl -fsS "$APP_URL/health" | grep -q '"ok"'
+    - curl -sI "$APP_URL/" | grep -qi "strict-transport-security"
+    - curl -sI "${APP_URL/https/http}/" | grep -qE "^HTTP/1.1 30[18]"   # HTTP -> HTTPS
+
+dast_zap:
+  <<: *on_main
+  stage: verify
+  needs: [smoke_test, infra_apply]
+  image: zaproxy/zap-stable:2.15.0
+  script:
+    - mkdir -p /zap/wrk
+    # Scan passif de l'application en production ; échoue sur les alertes de niveau FAIL
+    - zap-baseline.py -t "$APP_URL" -r zap-report.html -J zap-report.json -I || EXIT=$?
+    - cp /zap/wrk/zap-report.* . 2>/dev/null || true
+    - exit ${EXIT:-0}
+  artifacts:
+    when: always
+    paths: [zap-report.html, zap-report.json]
+    expire_in: 30 days
+
+# --------------------------- DESTRUCTION -------------------------------
+infra_destroy:
+  <<: *terraform
+  stage: verify
+  environment:
+    name: production
+    action: stop
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+  allow_failure: true
+  script:
+    - terraform destroy -input=false -auto-approve -lock-timeout=60s

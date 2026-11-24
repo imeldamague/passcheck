@@ -1,0 +1,6 @@
+# Versions figées (pip-audit en CI). Mettre à jour via merge request.
+flask==3.1.3
+flask-wtf==1.3.0
+flask-limiter==4.1.1
+argon2-cffi==25.1.0
+gunicorn==27.0.1
