@@ -42,7 +42,17 @@ resource "aws_route_table_association" "public" {
 }
 
 # ---- Journalisation des flux réseau (détection / investigation) ----
+# Compte AWS normal (use_lab_role = false) : Flow Logs -> CloudWatch Logs chiffré KMS.
+# Learner Lab : désactivés, car l'environnement bloque les deux destinations :
+#   - CloudWatch : LabRole n'accepte pas le service vpc-flow-logs.amazonaws.com
+#   - S3 : une SCP AWS Academy interdit s3:GetBucketObjectLockConfiguration,
+#     appelé par Terraform après chaque création de bucket (voir README).
+locals {
+  flow_logs_enabled = !var.use_lab_role
+}
+
 resource "aws_cloudwatch_log_group" "flow_logs" {
+  count             = local.flow_logs_enabled ? 1 : 0
   name              = "/${var.project}/vpc-flow-logs"
   retention_in_days = 365
   kms_key_id        = aws_kms_key.main.arn
@@ -59,30 +69,29 @@ data "aws_iam_policy_document" "flow_logs_assume" {
 }
 
 resource "aws_iam_role" "flow_logs" {
+  count              = local.flow_logs_enabled ? 1 : 0
   name               = "${var.project}-flow-logs"
   assume_role_policy = data.aws_iam_policy_document.flow_logs_assume.json
 }
 
-data "aws_iam_policy_document" "flow_logs" {
-  statement {
-    actions = [
-      "logs:CreateLogStream",
-      "logs:PutLogEvents",
-      "logs:DescribeLogStreams",
-    ]
-    resources = ["${aws_cloudwatch_log_group.flow_logs.arn}:*"]
-  }
-}
-
 resource "aws_iam_role_policy" "flow_logs" {
-  name   = "flow-logs-write"
-  role   = aws_iam_role.flow_logs.id
-  policy = data.aws_iam_policy_document.flow_logs.json
+  count = local.flow_logs_enabled ? 1 : 0
+  name  = "flow-logs-write"
+  role  = aws_iam_role.flow_logs[0].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"]
+      Resource = "${aws_cloudwatch_log_group.flow_logs[0].arn}:*"
+    }]
+  })
 }
 
 resource "aws_flow_log" "vpc" {
+  count           = local.flow_logs_enabled ? 1 : 0
   vpc_id          = aws_vpc.main.id
   traffic_type    = "ALL"
-  log_destination = aws_cloudwatch_log_group.flow_logs.arn
-  iam_role_arn    = aws_iam_role.flow_logs.arn
+  log_destination = aws_cloudwatch_log_group.flow_logs[0].arn
+  iam_role_arn    = aws_iam_role.flow_logs[0].arn
 }
