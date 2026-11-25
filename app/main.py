@@ -119,11 +119,11 @@ def _register_routes(app: Flask) -> None:
     def login():
         if request.method == "POST":
             username = request.form.get("username", "").strip()
-            pwd = request.form.get("password", "")[:passwords.MAX_LENGTH]
+            pwd = request.form.get("password", "")
             user = db.get_user(username) if USERNAME_RE.fullmatch(username) \
                 else None
             stored = user["password_hash"] if user else None
-            if passwords.verify_password(stored, pwd):
+            if len(pwd) <= passwords.MAX_LENGTH and passwords.verify_password(stored, pwd):
                 if passwords.needs_rehash(stored):
                     db.update_hash(user["id"], passwords.hash_password(pwd))
                 session.clear()  # nouvelle session : anti fixation de session

@@ -92,3 +92,30 @@ def test_production_requires_secret_key(monkeypatch):
     monkeypatch.delenv("SECRET_KEY", raising=False)
     with pytest.raises(RuntimeError):
         create_app()
+
+
+def test_login_rejects_overlong_password(client):
+    password = "Zx9!" * 32
+
+    response = client.post("/register", data={
+        "username": "audituser",
+        "password": password,
+        "confirm": password,
+    })
+    assert response.status_code == 302
+
+    response = client.post("/login", data={
+        "username": "audituser",
+        "password": password + "extra",
+    })
+    assert response.status_code == 401
+
+    with client.session_transaction() as session:
+        assert "user" not in session
+
+    response = client.post("/login", data={
+        "username": "audituser",
+        "password": password,
+    })
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/account")
