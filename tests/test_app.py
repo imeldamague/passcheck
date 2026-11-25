@@ -94,7 +94,6 @@ def test_production_requires_secret_key(monkeypatch):
         create_app()
 
 
-<<<<<<< Updated upstream
 def test_login_rejects_overlong_password(client):
     password = "Zx9!" * 32
 
@@ -120,7 +119,8 @@ def test_login_rejects_overlong_password(client):
     })
     assert response.status_code == 302
     assert response.headers["Location"].endswith("/account")
-=======
+
+
 def _https_form(client, path):
     html = client.get(path, base_url="https://passcheck.test").data.decode()
     return re.search(r'name="csrf_token" value="([^"]+)"', html).group(1)
@@ -146,4 +146,3 @@ def test_https_cross_site_post_rejected(tmp_path):
                     headers={"Referer": "https://evil.example/attack"},
                     data={"csrf_token": _https_form(client, "/password"), "password": "x"})
     assert r.status_code == 400
->>>>>>> Stashed changes
