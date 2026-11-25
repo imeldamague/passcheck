@@ -22,7 +22,7 @@ flowchart LR
     U([Utilisateur<br/>Internet]) -->|HTTPS 443<br/>HTTP 80 → 301| EIP[Elastic IP<br/>x-x-x-x.sslip.io]
 
     subgraph AWS["AWS – région us-east-1"]
-      subgraph VPC["VPC 10.20.0.0/16 · Flow Logs → CloudWatch (KMS)"]
+      subgraph VPC["VPC 10.20.0.0/16 · Flow Logs → S3 chiffré KMS"]
         subgraph SN["Sous-réseau public 10.20.1.0/24"]
           SG{{Security Group<br/>entrée : 80, 443 uniquement<br/>aucun SSH}}
           subgraph EC2["EC2 t3.micro · Amazon Linux 2023<br/>IMDSv2 · EBS chiffré KMS · monitoring détaillé"]
@@ -69,9 +69,9 @@ flowchart LR
 | **Secrets dans SSM Parameter Store** (SecureString, KMS) | Ni dans le code, ni dans l'image, ni dans le *user data*. Ils sont lus au démarrage du conteneur. |
 | **IMDSv2 obligatoire, hop limit 1** | Bloque le vol des credentials IAM par SSRF (scénario Capital One). Les conteneurs ne peuvent pas joindre l'IMDS. |
 | **KMS dédié** (EBS, ECR, SSM, logs) avec rotation | Chiffrement au repos maîtrisé, et révocable. |
-| **VPC Flow Logs** (rétention 1 an) | Détection et investigation d'incidents. |
+| **VPC Flow Logs → S3** (privé, chiffré KMS, versionné, rétention 1 an, HTTPS obligatoire) | Détection et investigation d'incidents. La destination S3 ne demande aucun rôle IAM. |
 | **État Terraform dans GitLab** | Chiffré, verrouillé pendant les `apply`, accessible selon les rôles. Pas de `.tfstate` dans Git. |
-| **Compatibilité AWS Academy Learner Lab** (`use_lab_role = true`) | Le Learner Lab interdit `iam:CreateRole`. L'instance utilise donc `LabInstanceProfile`, et les Flow Logs `LabRole`. Les rôles au moindre privilège restent dans le code et sont créés automatiquement sur un vrai compte (`use_lab_role = false`). |
+| **Compatibilité AWS Academy Learner Lab** (`use_lab_role = true`) | Le Learner Lab interdit `iam:CreateRole`. L'instance utilise donc `LabInstanceProfile` (vérifié : `LabRole` accepte `ec2.amazonaws.com`, mais pas `vpc-flow-logs.amazonaws.com`, d'où les Flow Logs vers S3). Les rôles au moindre privilège restent dans le code et sont créés automatiquement sur un vrai compte (`use_lab_role = false`). |
 | **SQLite** sur volume hôte | Suffisant pour la charge du projet, sans coût ni service à exposer. *Limite :* il n'y a qu'une seule instance (voir §8). |
 
 ### Résilience
@@ -263,7 +263,7 @@ docker run --rm -p 8080:8080 --read-only --tmpfs /tmp --cap-drop ALL \
 
 | Référentiel | Couverture |
 |---|---|
-| **OWASP Top 10 2021** | A01 (contrôle d'accès, session), A02 (Argon2id, TLS, KMS), A03 (SQL paramétré, CSP), A05 (durcissement, en-têtes), A06 (SCA), A07 (anti brute force, anti-énumération), A08 (intégrité des listes, images immuables), A09 (Flow Logs, logs applicatifs) |
+| **OWASP Top 10 2021** | A01 (contrôle d'accès, session), A02 (Argon2id, TLS, KMS), A03 (SQL paramétré, CSP), A05 (durcissement, en-têtes), A06 (SCA), A07 (anti brute force, anti-énumération), A08 (intégrité des listes, images immuables), A09 (Flow Logs S3, logs applicatifs) |
 | **ANSSI** | Recommandations sur les mots de passe et le stockage (Argon2), durcissement des conteneurs Docker, administration sans SSH |
 | **CIS Benchmarks** | Docker (non-root, read-only, capabilities), AWS Foundations (IMDSv2, chiffrement, Flow Logs) |
 | **NIS 2, art. 21** | Sécurité de la chaîne d'approvisionnement (SCA, SBOM, versions figées), gestion des vulnérabilités, chiffrement, contrôle d'accès |

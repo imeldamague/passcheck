@@ -86,5 +86,4 @@ data "aws_iam_instance_profile" "lab" {
 locals {
   instance_profile_name = var.use_lab_role ? data.aws_iam_instance_profile.lab[0].name : aws_iam_instance_profile.instance[0].name
   instance_role_arn     = var.use_lab_role ? data.aws_iam_role.lab[0].arn : aws_iam_role.instance[0].arn
-  flow_logs_role_arn    = var.use_lab_role ? data.aws_iam_role.lab[0].arn : aws_iam_role.flow_logs[0].arn
 }
