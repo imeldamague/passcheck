@@ -37,3 +37,22 @@ variable "acme_email" {
   type        = string
   default     = ""
 }
+
+# ---- Compatibilité AWS Academy Learner Lab ----
+# Le Learner Lab interdit iam:CreateRole : on utilise le rôle fourni (LabRole).
+# Sur un compte AWS normal, mettre false pour créer les rôles au moindre privilège.
+variable "use_lab_role" {
+  description = "true = Learner Lab (LabRole / LabInstanceProfile), false = rôles dédiés"
+  type        = bool
+  default     = true
+}
+
+variable "lab_role_name" {
+  type    = string
+  default = "LabRole"
+}
+
+variable "lab_instance_profile_name" {
+  type    = string
+  default = "LabInstanceProfile"
+}
