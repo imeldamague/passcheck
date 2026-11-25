@@ -26,7 +26,7 @@ data "aws_iam_policy_document" "kms" {
     }
   }
   statement {
-    sid = "LogDeliveryToS3"
+    sid = "CloudWatchLogs"
     actions = [
       "kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*",
       "kms:GenerateDataKey*", "kms:DescribeKey",
@@ -34,12 +34,12 @@ data "aws_iam_policy_document" "kms" {
     resources = ["*"]
     principals {
       type        = "Service"
-      identifiers = ["delivery.logs.amazonaws.com"]
+      identifiers = ["logs.${var.region}.amazonaws.com"]
     }
     condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [data.aws_caller_identity.current.account_id]
+      test     = "ArnLike"
+      variable = "kms:EncryptionContext:aws:logs:arn"
+      values   = ["arn:aws:logs:${var.region}:${data.aws_caller_identity.current.account_id}:*"]
     }
   }
 }
