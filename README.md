@@ -5,13 +5,17 @@ PassCheck est une application web Flask qui :
 - vérifie si un mot de passe figure parmi les plus courants (listes SecLists) ;
 - permet de créer un compte et de se connecter, avec **stockage sécurisé des mots de passe (Argon2id)**.
 
-Elle est construite, testée, analysée et déployée sur **AWS** par une pipeline **GitLab CI/CD** dont chaque contrôle de sécurité est bloquant.
+Elle est construite, testée, analysée et déployée sur **AWS** par une pipeline **GitLab CI/CD** avec des contrôles bloquants selon les seuils définis et des rapports de synthèse automatiques. Le projet est un démonstrateur pédagogique, pas une certification de sécurité.
 
 | | |
 |---|---|
 | URL de production | `https://<ip-avec-tirets>.sslip.io` (affichée par `terraform output app_url` et dans **Operate → Environments**) |
 | Stack | Python 3.12 · Flask 3.1 · Gunicorn · SQLite · Docker · Caddy · Terraform · AWS (EC2, ECR, SSM, KMS, CloudWatch) |
-| Équipe | voir [`CONTRIBUTING.md`](CONTRIBUTING.md) |
+| Équipe | Imelda et Aboubakary — voir [`CONTRIBUTING.md`](CONTRIBUTING.md) |
+| Dernière validation de référence | [Pipeline main #3113918874](https://gitlab.com/aboubakary/passcheck/-/pipelines/3113918874), commit `11048eb9`, 25/11/2026 : 20/20 jobs suivis réussis |
+| Revue de code | [Merge Request !3](https://gitlab.com/aboubakary/passcheck/-/merge_requests/3), approuvée et fusionnée |
+
+> L'URL publique exacte reste à renseigner après confirmation par le responsable AWS. Le smoke test HTTPS de la pipeline de référence est réussi.
 
 ---
 
@@ -41,7 +45,7 @@ flowchart LR
     end
 
     EIP --> SG --> CADDY
-    EC2 -. rôle IAM moindre privilège .-> ECR
+    EC2 -. LabRole en lab / rôle dédié hors lab .-> ECR
     EC2 -. GetParameter + Decrypt .-> SSM
     CW -. récupère l'instance .-> EC2
 
@@ -52,7 +56,7 @@ flowchart LR
       TFS[(État Terraform<br/>chiffré + verrouillé)]
     end
     REPO --> CI --> REG
-    CI -->|terraform apply| AWS
+    CI -->|Terraform plan et apply manuel| EC2
     CI -->|push image| ECR
     CI -->|send-command deploy.sh| SM --> EC2
     CI --- TFS
@@ -64,10 +68,10 @@ flowchart LR
 |---|---|
 | **EC2 + Docker** derrière **Caddy** | Simple et maîtrisé dans une sandbox. Caddy gère le **TLS automatique** (Let's Encrypt), la redirection HTTP → HTTPS et HSTS. |
 | **sslip.io** | Nom de domaine gratuit dérivé de l'Elastic IP : il permet d'obtenir un vrai certificat TLS sans acheter de domaine. |
-| **Aucun port SSH**, administration par **SSM Session Manager** | Surface d'attaque réduite, aucune clé SSH à gérer, chaque session est tracée dans CloudTrail. |
+| **Aucun port SSH**, administration par **SSM Session Manager** | Surface d'attaque réduite, aucune clé SSH à gérer, les appels d'administration peuvent être audités via CloudTrail. |
 | **ECR + rôle IAM** pour tirer l'image | Aucun identifiant de registre stocké sur la machine : le rôle de l'instance suffit. |
 | **Secrets dans SSM Parameter Store** (SecureString, KMS) | Ni dans le code, ni dans l'image, ni dans le *user data*. Ils sont lus au démarrage du conteneur. |
-| **IMDSv2 obligatoire, hop limit 1** | Bloque le vol des credentials IAM par SSRF (scénario Capital One). Les conteneurs ne peuvent pas joindre l'IMDS. |
+| **IMDSv2 obligatoire, hop limit 1** | Réduit le risque d'accès aux identifiants IAM via SSRF ; le hop limit à 1 limite l'accès IMDS depuis les conteneurs en réseau bridge. |
 | **KMS dédié** (EBS, ECR, SSM, logs) avec rotation | Chiffrement au repos maîtrisé, et révocable. |
 | **VPC Flow Logs → CloudWatch** (chiffré KMS, rétention 1 an) | Détection et investigation d'incidents. Désactivés en Learner Lab : voir la ligne suivante et le §8. |
 | **État Terraform dans GitLab** | Chiffré, verrouillé pendant les `apply`, accessible selon les rôles. Pas de `.tfstate` dans Git. |
@@ -76,31 +80,42 @@ flowchart LR
 
 ### Résilience
 
+Les mécanismes ci-dessous sont prévus par l'infrastructure ; les essais de panne et de restauration n'ont pas été documentés dans les preuves disponibles. Il ne s'agit pas d'une architecture haute disponibilité.
+
 - **Redémarrage automatique** : `--restart unless-stopped` sur les conteneurs, et un `HEALTHCHECK` dans l'image.
 - **Auto-recovery EC2** : une alarme CloudWatch sur `StatusCheckFailed_System` déclenche `ec2:recover`, et une autre sur `StatusCheckFailed_Instance` déclenche un reboot.
 - **Redéploiement au démarrage** : un service systemd relance `deploy.sh`, qui récupère la version courante dans SSM.
-- **Elastic IP** : l'URL reste la même si l'instance est recréée.
-- **Infrastructure immuable** : toute l'infrastructure se recrée avec `terraform apply`, et chaque image est identifiée par le SHA de son commit. Un retour arrière consiste à redéployer un tag précédent.
-- **Limites de ressources** sur les conteneurs (mémoire, CPU, PIDs) : une application défaillante ne peut pas faire tomber l'hôte.
+- **Elastic IP** : l'URL peut rester la même si l'Elastic IP est conservée et réassociée.
+- **Infrastructure immuable** : l'infrastructure est décrite par Terraform et chaque image applicative est identifiée par le SHA court de son commit. Un retour arrière manuel est possible en principe en redéployant un tag ECR encore disponible ; il n'est pas automatisé ni testé dans les preuves fournies.
+- **Limites de ressources** sur les conteneurs (mémoire, CPU, PIDs) : ces limites réduisent le risque d'épuisement des ressources de l'hôte.
 
 ---
 
 ## 2. Cycle de vie sécurisé (pipeline)
 
 ```mermaid
-flowchart LR
-    DEV[Développeur<br/>branche feature/*] -->|push| MR[Merge Request<br/>revue + approbation]
-    MR --> L[lint<br/>flake8 · hadolint<br/>terraform validate<br/>intégrité wordlists]
-    L --> S[security<br/>gitleaks · bandit · semgrep<br/>pip-audit · trivy fs · checkov]
-    S --> T[test<br/>pytest 16 tests]
-    T --> B[build<br/>image taggée SHA]
-    B --> IT[image-test<br/>run durci · non-root<br/>health · headers]
-    IT --> IS[image-scan<br/>trivy image · SBOM]
-    IS -->|merge sur main| P[infra<br/>plan → apply manuel]
-    P --> PUB[publish<br/>ECR immuable]
-    PUB --> D[deploy<br/>SSM Run Command]
-    D --> V[verify<br/>smoke test HTTPS<br/>DAST OWASP ZAP]
+flowchart TD
+    DEV["Développeur : branche feature/*"] --> MR["Merge Request : CI et revue"]
+    MR --> L["lint : flake8, hadolint, Terraform, wordlists"]
+    L --> S["security : Gitleaks, Bandit, Semgrep, pip-audit, Trivy FS, Checkov"]
+    S --> T["test : 17 tests Pytest"]
+    T --> B["build : image taggée SHA"]
+    B --> IT["image-test : non-root, health, en-têtes"]
+    IT --> IS["image-scan : Trivy et SBOM"]
+    IS --> R["report : HTML et JSON"]
+    R --> M{"Branche main ?"}
+    M -->|Non| FIN["Fin CI / revue puis fusion si validée"]
+    FIN -. Nouvelle pipeline main .-> L
+    M -->|Oui| P["infra : plan puis apply manuel"]
+    P --> PUB["publish : ECR"]
+    PUB --> D["deploy : SSM Run Command"]
+    D --> V["verify : HTTPS puis OWASP ZAP"]
+    V --> F["final-report : rapport CI/CD"]
+    S -. Échec : étapes normales bloquées .-> R
+    P -. Échec : rapport partiel .-> F
 ```
+
+Le schéma représente le flux logique. Les jobs de reporting utilisent `when: always` pour conserver les preuves disponibles même en cas d'échec. Les dépendances `needs` de GitLab peuvent permettre à certains jobs de démarrer indépendamment de la fin d'un stage ; le rapport n'est pas un contrôle de sécurité supplémentaire.
 
 | Étape | Outil | Ce qui est vérifié | Bloquant |
 |---|---|---|---|
@@ -114,17 +129,32 @@ flowchart LR
 | security | **pip-audit** | CVE des dépendances Python (SCA) | ✅ |
 | security | **trivy fs** | CVE et secrets dans le dépôt | ✅ HIGH/CRITICAL |
 | security | **checkov** | Terraform, Dockerfile et `.gitlab-ci.yml` (IaC) | ✅ |
-| test | **pytest** | 16 tests fonctionnels **et de sécurité** (CSRF, injection SQL, brute force, énumération, hachage…) | ✅ |
+| test | **pytest** | 17 tests fonctionnels **et de sécurité** (CSRF, injection SQL, brute force, énumération, hachage…) | ✅ |
 | build | docker | Image construite, taggée avec le **SHA du commit** et poussée dans le registry GitLab | ✅ |
 | image-test | docker | L'image démarre **avec les restrictions de production** (read-only, cap-drop ALL, no-new-privileges), répond sur `/health`, tourne en UID 10001 | ✅ |
-| image-scan | **trivy image** | CVE de l'image finale + génération du **SBOM CycloneDX** | ✅ HIGH/CRITICAL |
+| image-scan | **trivy image** | Rapport JSON de toutes les sévérités + SBOM CycloneDX | ✅ HIGH/CRITICAL avec correctif identifié (`--ignore-unfixed`) |
+| report | Python + defusedxml | Synthèse HTML et JSON des 14 jobs CI | Exécuté même en cas d'échec |
 | infra | terraform | `plan`, puis `apply` **manuel** (validation humaine avant la production) | ✅ |
 | publish | ECR | Copie de l'image testée vers ECR, tags **immuables** | ✅ |
 | deploy | SSM | Mise à jour du tag dans SSM, puis `deploy.sh` exécuté par Run Command (sans SSH) | ✅ |
 | verify | curl | Santé en HTTPS, HSTS, redirection HTTP → HTTPS | ✅ |
-| verify | **OWASP ZAP** | **DAST** : scan passif de l'application en production | ✅ niveau FAIL |
+| verify | **OWASP ZAP** | DAST baseline : scan passif, les WARN ne font pas échouer le job (`-I`) | ✅ FAIL |
+| final-report | Python + defusedxml | Synthèse HTML et JSON des 20 jobs CI/CD sur main, hors destruction | Exécuté même en cas d'échec |
 
-**Principe de promotion :** c'est l'image **exacte** qui a passé les tests et les scans qui est déployée. On ne reconstruit jamais l'image entre le test et la production.
+**Principe de promotion :** la pipeline construit une image taggée avec le SHA court du commit, la teste, la scanne, puis la copie du registre GitLab vers ECR sans reconstruction. Une vérification cryptographique du digest au déploiement reste une amélioration possible.
+
+### Rapports automatiques et preuves
+
+| Job | Périmètre | Artefacts |
+|---|---|---|
+| `security_report` | 14 jobs CI avant déploiement | `ci-report/report.html`, `ci-report/summary.json` |
+| `deployment_report` | 20 jobs CI/CD sur `main` | `deployment-report/report.html`, `deployment-report/summary.json` |
+| `image_scan` | Inventaire et analyse de l'image | `sbom.cdx.json`, `trivy-image.json` |
+| `dast_zap` | Analyse dynamique | `zap-report.html`, `zap-report.json` |
+
+Le script [`scripts/generate_security_report.py`](scripts/generate_security_report.py) consolide les statuts `CI_JOB_STATUS` enregistrés dans `after_script` et les résultats JSON/JUnit. Les XML sont analysés avec `defusedxml==0.7.1` et les DTD sont interdites. Les valeurs provenant des rapports sont échappées pour le HTML. Une preuve absente est marquée « Non confirmé / non exécuté », jamais comme un succès. Le statut final du job reste celui de GitLab.
+
+Les rapports de synthèse sont conservés comme artefacts pendant 30 jours. Certains rapports bruts expirent au bout d'une semaine. Après une relance d'un job amont, il peut être nécessaire de relancer uniquement le job de synthèse pour actualiser son contenu. Ne pas confondre un rapport historique avec l'état courant de la pipeline.
 
 ---
 
@@ -147,10 +177,19 @@ flowchart LR
 | 11 | Aucun en-tête de sécurité | ZAP / revue | XSS, clickjacking, sniffing MIME | CSP stricte, X-Frame-Options, nosniff, Referrer-Policy, HSTS (Caddy) |
 | 12 | 74 erreurs de style | flake8 | Code difficile à relire | Code conforme (0 erreur) |
 
+### Corrections complémentaires après l'audit du binôme
+
+| Constat | Correction | Preuve |
+|---|---|---|
+| Troncature silencieuse du mot de passe de connexion à 128 caractères | Rejet explicite des entrées trop longues, sans troncature | `e996cbb` : test de non-régression, échec reproduit avant correction puis succès |
+| Gunicorn à deux workers avec limiteur en mémoire ; erreur de socket de contrôle sur FS read-only | Un worker, deux threads, `--no-control-socket` | `819712b` : démarrage local sans l'erreur, test de débit local V2 (5 réponses 401 puis 2 réponses 429) |
+| Image Debian 12 avec occurrences HIGH/CRITICAL | Migration vers Debian 13 et mise à jour ciblée de `libzstd1` | `819712b` : scans locaux avant/après et Trivy CI |
+| Parseur XML standard dans le générateur de rapports | `defusedxml`, refus des DTD, gestion des exceptions | `793fc3e` : Semgrep bloquant sur #3113725167 puis pipeline #3113820235 réussie |
+
 ### Mesures transverses
 
 - **Configuration par variables d'environnement.** L'application **refuse de démarrer** en production si `SECRET_KEY` est absente.
-- **Cookies de session** `Secure`, `HttpOnly` et `SameSite=Lax`, d'une durée de 30 minutes. La session est **régénérée à la connexion**, contre la fixation de session.
+- **Cookies de session** `Secure`, `HttpOnly` et `SameSite=Lax`, d'une durée de 30 minutes. La session est vidée puis recréée côté application à la connexion (`session.clear()`).
 - **Requêtes SQL paramétrées** exclusivement. Un test vérifie que l'injection `' OR '1'='1` échoue.
 - **Pages d'erreur génériques** : aucune trace d'erreur (*stack trace*) n'est exposée.
 - **Le mot de passe n'est jamais journalisé ni renvoyé** dans une page (vérifié par un test).
@@ -161,12 +200,12 @@ flowchart LR
 
 | Mesure | Détail |
 |---|---|
-| **Argon2id** (`argon2-cffi`) | Algorithme recommandé par l'OWASP, l'ANSSI et la RFC 9106. Profil par défaut : t=3, m=64 Mio, p=4. Coûteux en mémoire, donc résistant aux attaques par GPU ou ASIC. |
+| **Argon2id** (`argon2-cffi`) | Algorithme de hachage de mots de passe à coût mémoire, décrit dans la RFC 9106. Profil par défaut : t=3, m=64 Mio, p=4. Coûteux en mémoire, donc résistant aux attaques par GPU ou ASIC. |
 | **Sel aléatoire** par mot de passe | Deux hachages du même mot de passe sont différents, ce qui rend les tables précalculées inutiles. |
 | **Re-hachage automatique** | Si les paramètres sont renforcés, le hash est mis à jour à la connexion suivante (`check_needs_rehash`). |
-| **Politique** (NIST SP 800-63B) | 12 caractères minimum et 128 maximum (anti-DoS). Interdiction des mots de passe présents dans les listes SecLists, et de ceux qui contiennent l'identifiant. |
-| **Anti-énumération** | Message d'erreur identique, et **vérification d'un hash factice** quand le compte n'existe pas, pour que le temps de réponse soit le même. |
-| **Anti brute force** | 5 tentatives par minute et par IP (vraie IP transmise par Caddy via `ProxyFix`). |
+| **Politique locale de mots de passe** | 12 caractères minimum et 128 maximum (anti-DoS). Cette politique est un choix du projet, pas une affirmation de conformité intégrale à NIST SP 800-63B. Interdiction des mots de passe présents dans les listes SecLists, et de ceux qui contiennent l'identifiant. |
+| **Anti-énumération** | Message d'erreur identique, et **vérification d'un hash factice** quand le compte n'existe pas, pour réduire les différences de temps de réponse entre comptes existants et inexistants. |
+| **Anti brute force** | 5 tentatives par minute et par IP sur la connexion et l'inscription, derrière Caddy avec `ProxyFix`. Compteur en mémoire, réinitialisé au redémarrage ; pas de partage entre instances. |
 | **Base de données** | SQLite sur un volume chiffré (EBS KMS), répertoire en mode `0700` appartenant à l'UID 10001. |
 
 Exemple de valeur stockée : `$argon2id$v=19$m=65536,t=3,p=4$<sel>$<hash>`. Le mot de passe en clair n'est jamais conservé.
@@ -175,7 +214,9 @@ Exemple de valeur stockée : `$argon2id$v=19$m=65536,t=3,p=4$<sel>$<hash>`. Le m
 
 ## 5. Sécurité de l'image et de l'exécution
 
-- **Build multi-stage**, base `python:3.12-slim-bookworm` (version figée), **sans outils de compilation** dans l'image finale.
+- **Build multi-stage**, base `python:3.12-slim-trixie` (Debian 13, builder et runtime, tag non épinglé par digest), **sans outils de compilation** dans l'image finale.
+- **Gunicorn** : un worker et deux threads, socket de contrôle désactivé pour le système de fichiers en lecture seule ; cette configuration évite la dispersion du limiteur en mémoire entre plusieurs workers.
+- **Mise à jour système ciblée** : `libzstd1=1.5.7+dfsg-1+deb13u1` dans l'image runtime (à surveiller lors des mises à jour des dépôts).
 - **Utilisateur non-root** (UID 10001, shell `nologin`). Le code appartient à root : l'application ne peut pas se modifier elle-même.
 - **Exécution durcie** : `--read-only`, `/tmp` en tmpfs `noexec`, `--cap-drop ALL`, `no-new-privileges`, limites de mémoire, de CPU et de PIDs.
 - **HEALTHCHECK** intégré à l'image, utilisé par la pipeline et par `deploy.sh`.
@@ -202,11 +243,20 @@ Exemple de valeur stockée : `$argon2id$v=19$m=65536,t=3,p=4$<sel>$<hash>`. Le m
 Les règles complètes sont dans [`CONTRIBUTING.md`](CONTRIBUTING.md). En résumé :
 
 - **GitLab Flow** : `main`, toujours déployable et **protégée** ; les branches `feature/*`, `fix/*` et `infra/*` se fusionnent par **Merge Request**.
-- **Personne ne pousse directement sur `main`**, Maintainers compris. Une MR ne peut être fusionnée que si la **pipeline est verte**, après **revue par un autre membre**, et une fois tous les fils de discussion résolus.
-- **Rôles GitLab au moindre privilège** : 1 Maintainer (configuration, variables, production), les autres en Developer. Pas d'Owner partagé.
-- **CODEOWNERS** : `infra/`, `.gitlab-ci.yml` et `Dockerfile` exigent la revue du référent sécurité.
-- **Commits** au format *Conventional Commits* (`feat:`, `fix:`, `sec:`…), **signés** (SSH ou GPG), et **releases** taguées en SemVer (`v1.2.0`).
-- **2FA obligatoire** sur les comptes du groupe, et **jetons d'accès** avec une date d'expiration et une portée minimale.
+- **Règle de travail :** pas de push direct sur `main` ; fusion après pipeline verte, revue par un autre membre et résolution des discussions. La MR !3 illustre cette procédure ; GitLab affichait l'approbation comme facultative, mais elle a effectivement été donnée avant la fusion.
+- **Séparation des responsabilités :** Imelda développe et soumet la MR ; Aboubakary approuve et fusionne sur `main` et gère le déploiement AWS. Les rôles et réglages exacts restent à vérifier dans le projet.
+- **CODEOWNERS** : fichier de référence dans `.gitlab/CODEOWNERS` ; vérifier que les règles d'approbation sont effectivement imposées.
+- **Commits** au format *Conventional Commits* (`feat:`, `fix:`…). Signature SSH/GPG, releases SemVer, 2FA et jetons à portée minimale : règles recommandées, application effective non vérifiée ici.
+
+### Contributions et traçabilité
+
+| Membre | Contributions |
+|---|---|
+| Imelda | Audit applicatif, correction de l'authentification, tests, durcissement Docker/Gunicorn, Trivy, rapport automatique et correction XML |
+| Aboubakary | Mise en place initiale du projet, infrastructure Terraform/AWS, CI/CD cloud, adaptation Learner Lab, revue et fusion de la MR !3, déploiement |
+| Ensemble | Validation, documentation et préparation de la soutenance |
+
+Commits d'Imelda : `e996cbb` (authentification), `819712b` (Docker), `7f8fa2a` (reporting), `793fc3e` (XML). La MR !3 a été approuvée et fusionnée par Aboubakary dans `main` au commit `11048eb9`, sans squash ni suppression de la branche source. La [pipeline de branche #3113820235](https://gitlab.com/aboubakary/passcheck/-/pipelines/3113820235) et la [pipeline MR #3113861230](https://gitlab.com/aboubakary/passcheck/-/pipelines/3113861230) sont réussies.
 
 ---
 
@@ -222,16 +272,21 @@ Les règles complètes sont dans [`CONTRIBUTING.md`](CONTRIBUTING.md). En résum
 | Clés AWS de sandbox dans GitLab | Fédération **OIDC GitLab → AWS** (jetons éphémères, aucune clé stockée) |
 | Images de base figées par tag | Épinglage par **digest** + mises à jour automatiques (Renovate) |
 | Images non signées | Signature **Cosign** et vérification au déploiement |
-| Limiteur de débit en mémoire (par worker) | Stockage Redis partagé |
+| Limiteur de débit en mémoire (un worker actuellement) | Stockage Redis partagé et persistant |
+| 53 occurrences HIGH sans correctif identifié lors du scan de référence | Surveillance des avis Debian, rebuild et revue régulière des risques |
+| 1 groupe d'alertes ZAP de risque moyen et 4 informatifs | Récupérer le rapport DAST détaillé, analyser et corriger ou justifier |
+| Pas de rollback automatique ; interruption possible durant le remplacement du conteneur | Déploiement blue/green, contrôle de santé avant bascule et rollback testé |
+| SQLite sur disque racine de l'instance (suppression possible lors du remplacement) | Volume persistant indépendant, snapshots et test de restauration |
+| Session AWS Academy temporaire | Renouveler les identifiants et coordonner les démonstrations avec la durée du lab |
 
 ---
 
 ## 9. Mise en route
 
-### Prérequis (une seule fois, par le Maintainer)
+### Prérequis (par le Maintainer ; identifiants AWS à renouveler à chaque session)
 
 1. **Settings → CI/CD → Variables**, chacune en **Protected** et **Masked** : `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION` (par exemple `us-east-1`). Les identifiants de sandbox expirent : il faut les mettre à jour à chaque nouvelle session.
-2. **Settings → Repository → Protected branches** : `main`, avec *Allowed to push* = **No one** et *Allowed to merge* = Maintainers + Developers.
+2. **Settings → Repository → Protected branches** : `main`, avec *Allowed to push* = **No one** et *Allowed to merge* = Maintainers ou membres explicitement autorisés ; vérifier les réglages réels du projet.
 3. **Settings → Merge requests** : cocher *Pipelines must succeed* et *All threads must be resolved*.
 
 ### Développement local
@@ -243,11 +298,24 @@ APP_ENV=development DB_PATH=./dev.db flask --app "app.main:create_app()" run --p
 python -m pytest
 ```
 
+### Développement local sous Windows (PowerShell)
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-dev.txt
+$env:APP_ENV = "development"
+$env:DB_PATH = "./dev.db"
+python -m flask --app "app.main:create_app()" run --port 8080
+```
+
+Dans un autre terminal, avec l'environnement virtuel activé : `python -m pytest -v` et `python -m flake8 app tests`.
+
 ### Avec Docker
 
 ```bash
 docker build -t passcheck .
-docker run --rm -p 8080:8080 --read-only --tmpfs /tmp --cap-drop ALL \
+docker run --rm -p 127.0.0.1:8080:8080 --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true \
   -e SECRET_KEY="$(openssl rand -hex 32)" -e APP_ENV=development passcheck
 ```
 
@@ -256,15 +324,55 @@ docker run --rm -p 8080:8080 --read-only --tmpfs /tmp --cap-drop ALL \
 1. Fusionner une MR sur `main`.
 2. Dans la pipeline, lancer le job manuel **`infra_apply`**. La publication, le déploiement, le smoke test et le DAST s'enchaînent ensuite automatiquement.
 3. L'URL s'affiche dans **Operate → Environments → production**.
-4. En fin de session de sandbox, lancer le job manuel **`infra_destroy`**.
+4. Vérifier le résultat de `deployment_report` et télécharger les artefacts HTML et JSON.
+5. En cas de refus `voc-cancel-cred`, le responsable AWS démarre une session Learner Lab autorisée, renouvelle les trois identifiants temporaires dans GitLab et relance `infra_plan`. Après la réussite des étapes cloud, actualiser `deployment_report` si nécessaire.
+6. **Destruction :** `infra_destroy` est réservé au responsable AWS lorsque la démonstration est terminée et les données/preuves sauvegardées. Cette action supprime les ressources gérées par Terraform ; ne pas l'exécuter pour actualiser un rapport.
 
 ---
 
-## 10. Correspondance avec les référentiels
+## 10. Résultats de validation du 25 novembre 2026
+
+Source : rapport automatique CI/CD de la [pipeline #3113918874](https://gitlab.com/aboubakary/passcheck/-/pipelines/3113918874), branche `main`, commit `11048eb91cf6b23089766e8320e4cd8d62a8a501`, généré à 14:17:30 UTC après relance du rapport.
+
+| Indicateur | Résultat |
+|---|---:|
+| Jobs suivis réussis / total | **20 / 20** |
+| Jobs suivis en échec / non confirmés | 0 / 0 |
+| Pytest | 17 réussis / 17 |
+| Gitleaks | 0 détection |
+| Bandit / Semgrep | 0 / 0 détection |
+| pip-audit | 20 dépendances analysées, 0 vulnérabilité détectée |
+| Checkov | 232 cas JUnit, 228 réussis, 4 ignorés, 0 échec et 0 erreur |
+| Trivy image : CRITICAL / HIGH / MEDIUM / LOW / UNKNOWN | 0 / 53 / 86 / 79 / 18 |
+| Trivy : occurrences totales / identifiants distincts | 236 / 106 |
+| Trivy : HIGH/CRITICAL avec version corrigée identifiée | 0 |
+| SBOM CycloneDX | 111 composants |
+| AWS : plan, apply, ECR, SSM, HTTPS, ZAP | 6 jobs réussis |
+| ZAP : groupes de risque élevé / moyen / faible / informatif | 0 / 1 / 0 / 4 |
+
+Comparaison des scans locaux de l'image avant/après durcissement : 102 occurrences HIGH/CRITICAL (100 HIGH, 2 CRITICAL) contre 53 (53 HIGH, 0 CRITICAL), soit 49 occurrences de moins (environ 48 %). Le dernier rapport CI confirme les 53 HIGH et l'absence de CRITICAL. Les résultats dépendent de la date du scan et de la base de vulnérabilités.
+
+**Interprétation :** 20/20 signifie que les jobs suivis ont réussi selon leurs seuils, pas que toute vulnérabilité a disparu. Le gate Trivy ignore les vulnérabilités sans correctif identifié ; ZAP baseline ne couvre pas tous les scénarios d'attaque et conserve une alerte moyenne. Les quatre exceptions Checkov doivent être justifiées dans les résultats bruts. Le statut de succès des jobs de déploiement ne prouve pas une disponibilité permanente ni une restauration testée.
+
+### Incidents rencontrés et résolus
+
+| Incident | Résolution |
+|---|---|
+| Semgrep a bloqué le parseur XML standard (#3113725167) | Correction via defusedxml, puis CI et MR vertes |
+| AWS Academy : refus explicite `voc-cancel-cred` lors de `infra_plan` | Renouvellement des accès temporaires par le responsable AWS, reprise de la pipeline |
+| Rapport CI/CD initial avec 14 réussites, 1 échec, 5 non confirmés | Relance du seul `deployment_report` après le déploiement ; rapport actualisé à 20/20 |
+
+Pour la démonstration, conserver les artefacts et captures de la MR, de la pipeline principale et de l'application HTTPS, sans identifiants AWS ni données personnelles.
+
+---
+
+## 11. Correspondance avec les référentiels
+
+Ces rapprochements sont indicatifs et non exhaustifs ; ils ne constituent ni une certification ni une preuve de conformité réglementaire.
 
 | Référentiel | Couverture |
 |---|---|
 | **OWASP Top 10 2021** | A01 (contrôle d'accès, session), A02 (Argon2id, TLS, KMS), A03 (SQL paramétré, CSP), A05 (durcissement, en-têtes), A06 (SCA), A07 (anti brute force, anti-énumération), A08 (intégrité des listes, images immuables), A09 (Flow Logs hors lab, alarmes CloudWatch, logs applicatifs) |
-| **ANSSI** | Recommandations sur les mots de passe et le stockage (Argon2), durcissement des conteneurs Docker, administration sans SSH |
+| **ANSSI** | Principes de sécurisation du stockage des mots de passe, durcissement des conteneurs Docker, administration sans SSH |
 | **CIS Benchmarks** | Docker (non-root, read-only, capabilities), AWS Foundations (IMDSv2, chiffrement, Flow Logs) |
 | **NIS 2, art. 21** | Sécurité de la chaîne d'approvisionnement (SCA, SBOM, versions figées), gestion des vulnérabilités, chiffrement, contrôle d'accès |
