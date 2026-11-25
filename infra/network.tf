@@ -42,47 +42,120 @@ resource "aws_route_table_association" "public" {
 }
 
 # ---- Journalisation des flux réseau (détection / investigation) ----
-resource "aws_cloudwatch_log_group" "flow_logs" {
-  name              = "/${var.project}/vpc-flow-logs"
-  retention_in_days = 365
-  kms_key_id        = aws_kms_key.main.arn
+# Destination S3 : aucun rôle IAM nécessaire (compatible Learner Lab, où LabRole
+# n'accepte pas le service vpc-flow-logs). Bucket privé, chiffré KMS, versionné,
+# rétention 1 an, HTTPS obligatoire, écriture réservée au service de livraison AWS.
+resource "aws_s3_bucket" "flow_logs" {
+  #checkov:skip=CKV_AWS_18:Bucket de journaux lui-meme ; journaliser ses acces creerait une boucle
+  #checkov:skip=CKV_AWS_144:Replication inter-regions non disponible dans le Learner Lab (2 regions)
+  #checkov:skip=CKV2_AWS_62:Pas de traitement evenementiel des journaux dans ce projet
+  bucket        = "${var.project}-flowlogs-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true # sandbox : permet le terraform destroy
 }
 
-data "aws_iam_policy_document" "flow_logs_assume" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["vpc-flow-logs.amazonaws.com"]
+resource "aws_s3_bucket_public_access_block" "flow_logs" {
+  bucket                  = aws_s3_bucket.flow_logs.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_ownership_controls" "flow_logs" {
+  bucket = aws_s3_bucket.flow_logs.id
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "flow_logs" {
+  bucket = aws_s3_bucket.flow_logs.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "flow_logs" {
+  bucket = aws_s3_bucket.flow_logs.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.main.arn
+    }
+    bucket_key_enabled = true
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "flow_logs" {
+  bucket = aws_s3_bucket.flow_logs.id
+  rule {
+    id     = "retention-1-an"
+    status = "Enabled"
+    filter {}
+    expiration {
+      days = 365
+    }
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
     }
   }
 }
 
-resource "aws_iam_role" "flow_logs" {
-  name               = "${var.project}-flow-logs"
-  assume_role_policy = data.aws_iam_policy_document.flow_logs_assume.json
-}
-
-data "aws_iam_policy_document" "flow_logs" {
+# Seul le service de livraison des journaux AWS peut écrire ; HTTPS obligatoire
+data "aws_iam_policy_document" "flow_logs_bucket" {
   statement {
-    actions = [
-      "logs:CreateLogStream",
-      "logs:PutLogEvents",
-      "logs:DescribeLogStreams",
-    ]
-    resources = ["${aws_cloudwatch_log_group.flow_logs.arn}:*"]
+    sid       = "AWSLogDeliveryWrite"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.flow_logs.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"]
+    principals {
+      type        = "Service"
+      identifiers = ["delivery.logs.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+  statement {
+    sid       = "AWSLogDeliveryAclCheck"
+    actions   = ["s3:GetBucketAcl"]
+    resources = [aws_s3_bucket.flow_logs.arn]
+    principals {
+      type        = "Service"
+      identifiers = ["delivery.logs.amazonaws.com"]
+    }
+  }
+  statement {
+    sid       = "DenyInsecureTransport"
+    effect    = "Deny"
+    actions   = ["s3:*"]
+    resources = [aws_s3_bucket.flow_logs.arn, "${aws_s3_bucket.flow_logs.arn}/*"]
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
   }
 }
 
-resource "aws_iam_role_policy" "flow_logs" {
-  name   = "flow-logs-write"
-  role   = aws_iam_role.flow_logs.id
-  policy = data.aws_iam_policy_document.flow_logs.json
+resource "aws_s3_bucket_policy" "flow_logs" {
+  bucket     = aws_s3_bucket.flow_logs.id
+  policy     = data.aws_iam_policy_document.flow_logs_bucket.json
+  depends_on = [aws_s3_bucket_public_access_block.flow_logs]
 }
 
 resource "aws_flow_log" "vpc" {
-  vpc_id          = aws_vpc.main.id
-  traffic_type    = "ALL"
-  log_destination = aws_cloudwatch_log_group.flow_logs.arn
-  iam_role_arn    = aws_iam_role.flow_logs.arn
+  vpc_id               = aws_vpc.main.id
+  traffic_type         = "ALL"
+  log_destination_type = "s3"
+  log_destination      = aws_s3_bucket.flow_logs.arn
+  depends_on           = [aws_s3_bucket_policy.flow_logs]
 }
