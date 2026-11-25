@@ -94,6 +94,7 @@ Les mécanismes ci-dessous sont prévus par l'infrastructure ; les essais de pan
 ## 2. Cycle de vie sécurisé (pipeline)
 
 ```mermaid
+<<<<<<< Updated upstream
 flowchart TD
     DEV["Développeur : branche feature/*"] --> MR["Merge Request : CI et revue"]
     MR --> L["lint : flake8, hadolint, Terraform, wordlists"]
@@ -113,6 +114,20 @@ flowchart TD
     V --> F["final-report : rapport CI/CD"]
     S -. Échec : étapes normales bloquées .-> R
     P -. Échec : rapport partiel .-> F
+=======
+flowchart LR
+    DEV[Développeur<br/>branche feature/*] -->|push| MR[Merge Request<br/>revue + approbation]
+    MR --> L[lint<br/>flake8 · hadolint<br/>terraform validate<br/>intégrité wordlists]
+    L --> S[security<br/>gitleaks · bandit · semgrep<br/>pip-audit · trivy fs · checkov]
+    S --> T[test<br/>pytest 18 tests]
+    T --> B[build<br/>image taggée SHA]
+    B --> IT[image-test<br/>run durci · non-root<br/>health · headers]
+    IT --> IS[image-scan<br/>trivy image · SBOM]
+    IS -->|merge sur main| P[infra<br/>plan → apply manuel]
+    P --> PUB[publish<br/>ECR immuable]
+    PUB --> D[deploy<br/>SSM Run Command]
+    D --> V[verify<br/>smoke test HTTPS<br/>DAST OWASP ZAP]
+>>>>>>> Stashed changes
 ```
 
 Le schéma représente le flux logique. Les jobs de reporting utilisent `when: always` pour conserver les preuves disponibles même en cas d'échec. Les dépendances `needs` de GitLab peuvent permettre à certains jobs de démarrer indépendamment de la fin d'un stage ; le rapport n'est pas un contrôle de sécurité supplémentaire.
@@ -129,7 +144,11 @@ Le schéma représente le flux logique. Les jobs de reporting utilisent `when: a
 | security | **pip-audit** | CVE des dépendances Python (SCA) | ✅ |
 | security | **trivy fs** | CVE et secrets dans le dépôt | ✅ HIGH/CRITICAL |
 | security | **checkov** | Terraform, Dockerfile et `.gitlab-ci.yml` (IaC) | ✅ |
+<<<<<<< Updated upstream
 | test | **pytest** | 17 tests fonctionnels **et de sécurité** (CSRF, injection SQL, brute force, énumération, hachage…) | ✅ |
+=======
+| test | **pytest** | 18 tests fonctionnels **et de sécurité** (CSRF en HTTP et HTTPS, injection SQL, brute force, énumération, hachage…) | ✅ |
+>>>>>>> Stashed changes
 | build | docker | Image construite, taggée avec le **SHA du commit** et poussée dans le registry GitLab | ✅ |
 | image-test | docker | L'image démarre **avec les restrictions de production** (read-only, cap-drop ALL, no-new-privileges), répond sur `/health`, tourne en UID 10001 | ✅ |
 | image-scan | **trivy image** | Rapport JSON de toutes les sévérités + SBOM CycloneDX | ✅ HIGH/CRITICAL avec correctif identifié (`--ignore-unfixed`) |

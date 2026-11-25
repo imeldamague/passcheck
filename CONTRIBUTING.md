@@ -45,6 +45,6 @@ En cas de secret poussé par erreur : **révoquer immédiatement le secret** (le
 ```bash
 pip install -r requirements-dev.txt pre-commit
 pre-commit install          # une fois
-python -m pytest            # 16 tests
+python -m pytest            # 18 tests
 flake8 app tests
 ```

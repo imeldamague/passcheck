@@ -94,6 +94,7 @@ def test_production_requires_secret_key(monkeypatch):
         create_app()
 
 
+<<<<<<< Updated upstream
 def test_login_rejects_overlong_password(client):
     password = "Zx9!" * 32
 
@@ -119,3 +120,30 @@ def test_login_rejects_overlong_password(client):
     })
     assert response.status_code == 302
     assert response.headers["Location"].endswith("/account")
+=======
+def _https_form(client, path):
+    html = client.get(path, base_url="https://passcheck.test").data.decode()
+    return re.search(r'name="csrf_token" value="([^"]+)"', html).group(1)
+
+
+def test_https_forms_work_with_csrf(tmp_path):
+    """Régression : en HTTPS, Flask-WTF exige un Referer de même origine."""
+    app = create_app({"TESTING": True, "DB_PATH": str(tmp_path / "h.db")})
+    client = app.test_client()
+    assert client.get("/").headers["Referrer-Policy"] == "same-origin"
+    same_origin = {"Referer": "https://passcheck.test/register"}
+    r = client.post("/register", base_url="https://passcheck.test", headers=same_origin,
+                    data={"csrf_token": _https_form(client, "/register"),
+                          "username": "alice", "password": STRONG, "confirm": STRONG})
+    assert r.status_code == 302
+
+
+def test_https_cross_site_post_rejected(tmp_path):
+    """Un formulaire posté depuis un autre site est refusé."""
+    app = create_app({"TESTING": True, "DB_PATH": str(tmp_path / "x.db")})
+    client = app.test_client()
+    r = client.post("/password", base_url="https://passcheck.test",
+                    headers={"Referer": "https://evil.example/attack"},
+                    data={"csrf_token": _https_form(client, "/password"), "password": "x"})
+    assert r.status_code == 400
+>>>>>>> Stashed changes
