@@ -21,10 +21,12 @@ stages:
   - build
   - image-test
   - image-scan
+  - report
   - infra
   - publish
   - deploy
   - verify
+  - final-report
 
 variables:
   IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
@@ -63,18 +65,39 @@ flake8:
   script:
     - pip install --quiet flake8
     - flake8 app tests
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
+  artifacts:
+    when: always
+    paths: [ci-status/flake8.txt]
+    expire_in: 30 days
 
 hadolint:
   stage: lint
   image: hadolint/hadolint:v2.12.0-debian
   script:
     - hadolint --failure-threshold warning Dockerfile
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
+  artifacts:
+    when: always
+    paths: [ci-status/hadolint.txt]
+    expire_in: 30 days
 
 wordlists_integrity:
   stage: lint
   image: $PYTHON_IMAGE
   script:
     - cd app/wordlists && sha256sum -c SHA256SUMS      # intégrité des listes embarquées
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
+  artifacts:
+    when: always
+    paths: [ci-status/wordlists_integrity.txt]
+    expire_in: 30 days
 
 terraform_validate:
   stage: lint
@@ -86,6 +109,13 @@ terraform_validate:
     - terraform fmt -check -recursive -diff || echo "Formatage a revoir (non bloquant)"
     - terraform init -backend=false -input=false
     - terraform validate
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
+  artifacts:
+    when: always
+    paths: [ci-status/terraform_validate.txt]
+    expire_in: 30 days
 
 # --------------------------- SECURITY --------------------------------
 gitleaks:
@@ -97,9 +127,12 @@ gitleaks:
     GIT_DEPTH: "0"                                   # tout l'historique
   script:
     - gitleaks detect --source . --redact --verbose --report-format json --report-path gitleaks.json
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
   artifacts:
     when: always
-    paths: [gitleaks.json]
+    paths: [gitleaks.json, ci-status/gitleaks.txt]
     expire_in: 1 week
 
 bandit:
@@ -107,8 +140,15 @@ bandit:
   image: $PYTHON_IMAGE
   script:
     - pip install --quiet bandit
-    - bandit -r app -f txt
+    - bandit -r app -f json -o bandit.json
   # B104/B113 de l'application d'origine corrigés : aucun résultat attendu
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
+  artifacts:
+    when: always
+    paths: [ci-status/bandit.txt, bandit.json]
+    expire_in: 30 days
 
 semgrep:
   stage: security
@@ -121,9 +161,12 @@ semgrep:
       --config p/python --config p/flask --config p/secrets --config p/dockerfile
       --exclude _original_app
       --junit-xml-output=semgrep.xml --json-output=semgrep.json .
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
   artifacts:
     when: always
-    paths: [semgrep.json]
+    paths: [semgrep.json, ci-status/semgrep.txt, semgrep.xml]
     reports:
       junit: semgrep.xml
     expire_in: 1 week
@@ -133,7 +176,14 @@ pip_audit:
   image: $PYTHON_IMAGE
   script:
     - pip install --quiet pip-audit
-    - pip-audit -r requirements.txt --strict
+    - pip-audit -r requirements.txt --strict --format json --output pip-audit.json
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
+  artifacts:
+    when: always
+    paths: [ci-status/pip_audit.txt, pip-audit.json]
+    expire_in: 30 days
 
 trivy_fs:
   stage: security
@@ -144,6 +194,13 @@ trivy_fs:
     # misconfig (IaC/Dockerfile) est couvert par Checkov, avec exceptions justifiées
     - trivy fs --scanners vuln,secret --skip-dirs _original_app --skip-dirs app/wordlists
         --severity HIGH,CRITICAL --exit-code 1 .
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
+  artifacts:
+    when: always
+    paths: [ci-status/trivy_fs.txt]
+    expire_in: 30 days
 
 checkov:
   stage: security
@@ -155,7 +212,11 @@ checkov:
       checkov -d . --framework terraform,dockerfile,gitlab_ci
       --skip-path _original_app --compact
       --output cli --output junitxml --output-file-path console,checkov.xml
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
   artifacts:
+    paths: [ci-status/checkov.txt, checkov.xml]
     when: always
     reports:
       junit: checkov.xml
@@ -168,10 +229,15 @@ pytest:
   script:
     - pip install --quiet -r requirements-dev.txt
     - python -m pytest --junitxml=pytest.xml
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
   artifacts:
+    paths: [ci-status/pytest.txt, pytest.xml]
     when: always
     reports:
       junit: pytest.xml
+    expire_in: 30 days
 
 # ----------------------------- BUILD ---------------------------------
 build_image:
@@ -183,6 +249,13 @@ build_image:
         --label org.opencontainers.image.source=$CI_PROJECT_URL
         -t "$IMAGE" .
     - docker push "$IMAGE"
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
+  artifacts:
+    when: always
+    paths: [ci-status/build_image.txt]
+    expire_in: 30 days
 
 # -------------------- VALIDATION DE L'IMAGE ---------------------------
 image_functional_test:
@@ -204,7 +277,13 @@ image_functional_test:
     - test "$(docker exec app id -u)" = "10001"
     - test "$(docker inspect -f '{{.State.Health.Status}}' app)" != "unhealthy"
   after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
     - docker logs app || true
+  artifacts:
+    when: always
+    paths: [ci-status/image_functional_test.txt]
+    expire_in: 30 days
 
 image_scan:
   stage: image-scan
@@ -217,11 +296,27 @@ image_scan:
   script:
     # SBOM (inventaire des composants, exigé par le Cyber Resilience Act)
     - trivy image --format cyclonedx --output sbom.cdx.json "$IMAGE"
+    - trivy image --scanners vuln --format json --output trivy-image.json "$IMAGE"
     # Quality gate : aucune vulnérabilité HIGH/CRITICAL corrigeable
     - trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
   artifacts:
     when: always
-    paths: [sbom.cdx.json]
+    paths: [sbom.cdx.json, ci-status/image_scan.txt, trivy-image.json]
+    expire_in: 30 days
+
+# ----------------------- RAPPORT SECURITE CI ---------------------------
+security_report:
+  stage: report
+  image: $PYTHON_IMAGE
+  when: always
+  script:
+    - python scripts/generate_security_report.py --scope ci
+  artifacts:
+    when: always
+    paths: [ci-report/]
     expire_in: 30 days
 
 # ------------------------ INFRA (main uniquement) ----------------------
@@ -238,6 +333,13 @@ infra_plan:
   stage: infra
   script:
     - terraform plan -input=false -lock-timeout=60s
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
+  artifacts:
+    when: always
+    paths: [ci-status/infra_plan.txt]
+    expire_in: 30 days
 
 infra_apply:
   <<: *terraform
@@ -254,9 +356,15 @@ infra_apply:
     - echo "APP_URL=$(terraform output -raw app_url)" > ../deploy.env
     - echo "INSTANCE_ID=$(terraform output -raw instance_id)" >> ../deploy.env
     - echo "ECR_URL=$(terraform output -raw ecr_repository_url)" >> ../deploy.env
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
   artifacts:
+    paths: [ci-status/infra_apply.txt]
+    when: always
     reports:
       dotenv: deploy.env
+    expire_in: 30 days
 
 # ------------------- PUBLICATION ET DÉPLOIEMENT ------------------------
 publish_ecr:
@@ -275,6 +383,13 @@ publish_ecr:
         docker tag "$IMAGE" "$ECR_URL:$CI_COMMIT_SHORT_SHA"
         docker push "$ECR_URL:$CI_COMMIT_SHORT_SHA"
       fi
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
+  artifacts:
+    when: always
+    paths: [ci-status/publish_ecr.txt]
+    expire_in: 30 days
 
 deploy_app:
   <<: *on_main
@@ -299,6 +414,13 @@ deploy_app:
     - aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID"
         --query '[Status,StandardOutputContent]' --output text
     - test "$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query Status --output text)" = "Success"
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
+  artifacts:
+    when: always
+    paths: [ci-status/deploy_app.txt]
+    expire_in: 30 days
 
 # ----------------------------- VERIFY ---------------------------------
 smoke_test:
@@ -312,6 +434,13 @@ smoke_test:
     - curl -fsS "$APP_URL/health" | grep -q '"ok"'
     - curl -sI "$APP_URL/" | grep -qi "strict-transport-security"
     - curl -sI "${APP_URL/https/http}/" | grep -qE "^HTTP/1.1 30[18]"   # HTTP -> HTTPS
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
+  artifacts:
+    when: always
+    paths: [ci-status/smoke_test.txt]
+    expire_in: 30 days
 
 dast_zap:
   <<: *on_main
@@ -324,9 +453,12 @@ dast_zap:
     - zap-baseline.py -t "$APP_URL" -r zap-report.html -J zap-report.json -I || EXIT=$?
     - cp /zap/wrk/zap-report.* . 2>/dev/null || true
     - exit ${EXIT:-0}
+  after_script:
+    - mkdir -p "$CI_PROJECT_DIR/ci-status"
+    - printf "%s\n" "$CI_JOB_STATUS" > "$CI_PROJECT_DIR/ci-status/$CI_JOB_NAME.txt"
   artifacts:
     when: always
-    paths: [zap-report.html, zap-report.json]
+    paths: [zap-report.html, zap-report.json, ci-status/dast_zap.txt]
     expire_in: 30 days
 
 # --------------------------- DESTRUCTION -------------------------------
@@ -342,3 +474,17 @@ infra_destroy:
   allow_failure: true
   script:
     - terraform destroy -input=false -auto-approve -lock-timeout=60s
+
+# ----------------------- RAPPORT POST-DEPLOIEMENT ----------------------
+deployment_report:
+  stage: final-report
+  image: $PYTHON_IMAGE
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: always
+  script:
+    - python scripts/generate_security_report.py --scope full
+  artifacts:
+    when: always
+    paths: [deployment-report/]
+    expire_in: 30 days
