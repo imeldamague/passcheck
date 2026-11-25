@@ -308,16 +308,19 @@ image_scan:
     expire_in: 30 days
 
 # ----------------------- RAPPORT SECURITE CI ---------------------------
+
 security_report:
   stage: report
   image: $PYTHON_IMAGE
   when: always
   script:
+    - python -m pip install --quiet defusedxml==0.7.1
     - python scripts/generate_security_report.py --scope ci
   artifacts:
     when: always
     paths: [ci-report/]
     expire_in: 30 days
+
 
 # ------------------------ INFRA (main uniquement) ----------------------
 .terraform: &terraform
@@ -476,6 +479,7 @@ infra_destroy:
     - terraform destroy -input=false -auto-approve -lock-timeout=60s
 
 # ----------------------- RAPPORT POST-DEPLOIEMENT ----------------------
+
 deployment_report:
   stage: final-report
   image: $PYTHON_IMAGE
@@ -483,6 +487,7 @@ deployment_report:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       when: always
   script:
+    - python -m pip install --quiet defusedxml==0.7.1
     - python scripts/generate_security_report.py --scope full
   artifacts:
     when: always

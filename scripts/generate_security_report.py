@@ -7,7 +7,8 @@ from html import escape
 import json
 import os
 from pathlib import Path
-import xml.etree.ElementTree as ET
+from defusedxml import ElementTree as ET
+from defusedxml.common import DefusedXmlException
 
 CI_JOBS = ['flake8', 'hadolint', 'wordlists_integrity', 'terraform_validate', 'gitleaks', 'bandit', 'semgrep', 'pip_audit', 'trivy_fs', 'checkov', 'pytest', 'build_image', 'image_functional_test', 'image_scan']
 CLOUD_JOBS = ['infra_plan', 'infra_apply', 'publish_ecr', 'deploy_app', 'smoke_test', 'dast_zap']
@@ -29,9 +30,10 @@ def read_json(filename):
 
 def junit(filename):
     try:
-        root = ET.parse(ROOT / filename).getroot()
-    except (OSError, ET.ParseError):
+        root = ET.parse(ROOT / filename, forbid_dtd=True).getroot()
+    except (OSError, ET.ParseError, DefusedXmlException):
         return None
+
     cases = list(root.iter("testcase"))
     return {
         "tests": len(cases),
