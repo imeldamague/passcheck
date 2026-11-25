@@ -20,7 +20,7 @@ resource "aws_instance" "app" {
   instance_type          = var.instance_type
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.web.id]
-  iam_instance_profile   = aws_iam_instance_profile.instance.name
+  iam_instance_profile   = local.instance_profile_name
   ebs_optimized          = true
   monitoring             = true
 

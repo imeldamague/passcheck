@@ -16,6 +16,16 @@ data "aws_iam_policy_document" "kms" {
     }
   }
   statement {
+    # Le rôle de l'instance peut déchiffrer ses secrets SSM (accord direct dans la politique de clé)
+    sid       = "InstanceDecrypt"
+    actions   = ["kms:Decrypt", "kms:DescribeKey"]
+    resources = ["*"]
+    principals {
+      type        = "AWS"
+      identifiers = [local.instance_role_arn]
+    }
+  }
+  statement {
     sid = "CloudWatchLogs"
     actions = [
       "kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*",
@@ -51,7 +61,7 @@ resource "aws_security_group" "web" {
   name        = "${var.project}-web"
   description = "HTTPS public, HTTP pour redirection et challenge ACME"
   #checkov:skip=CKV_AWS_260:Port 80 requis pour la redirection 301 vers HTTPS et le challenge Let's Encrypt HTTP-01 ; aucune donnee servie en clair
-  vpc_id      = aws_vpc.main.id
+  vpc_id = aws_vpc.main.id
 
   ingress {
     description = "HTTPS public"
@@ -62,7 +72,7 @@ resource "aws_security_group" "web" {
   }
 
   ingress {
-    description = "HTTP : redirection 301 vers HTTPS + challenge Let's Encrypt"
+    description = "HTTP : redirection 301 vers HTTPS + challenge ACME LetsEncrypt"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
@@ -70,7 +80,7 @@ resource "aws_security_group" "web" {
   }
 
   egress {
-    description = "HTTPS sortant : ECR, SSM, Let's Encrypt, mises a jour"
+    description = "HTTPS sortant : ECR, SSM, LetsEncrypt, mises a jour"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"

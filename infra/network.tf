@@ -59,6 +59,8 @@ data "aws_iam_policy_document" "flow_logs_assume" {
 }
 
 resource "aws_iam_role" "flow_logs" {
+  count = var.use_lab_role ? 0 : 1
+
   name               = "${var.project}-flow-logs"
   assume_role_policy = data.aws_iam_policy_document.flow_logs_assume.json
 }
@@ -75,8 +77,10 @@ data "aws_iam_policy_document" "flow_logs" {
 }
 
 resource "aws_iam_role_policy" "flow_logs" {
+  count = var.use_lab_role ? 0 : 1
+
   name   = "flow-logs-write"
-  role   = aws_iam_role.flow_logs.id
+  role   = aws_iam_role.flow_logs[0].id
   policy = data.aws_iam_policy_document.flow_logs.json
 }
 
@@ -84,5 +88,5 @@ resource "aws_flow_log" "vpc" {
   vpc_id          = aws_vpc.main.id
   traffic_type    = "ALL"
   log_destination = aws_cloudwatch_log_group.flow_logs.arn
-  iam_role_arn    = aws_iam_role.flow_logs.arn
+  iam_role_arn    = local.flow_logs_role_arn
 }

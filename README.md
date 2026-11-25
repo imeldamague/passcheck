@@ -71,6 +71,7 @@ flowchart LR
 | **KMS dédié** (EBS, ECR, SSM, logs) avec rotation | Chiffrement au repos maîtrisé, et révocable. |
 | **VPC Flow Logs** (rétention 1 an) | Détection et investigation d'incidents. |
 | **État Terraform dans GitLab** | Chiffré, verrouillé pendant les `apply`, accessible selon les rôles. Pas de `.tfstate` dans Git. |
+| **Compatibilité AWS Academy Learner Lab** (`use_lab_role = true`) | Le Learner Lab interdit `iam:CreateRole`. L'instance utilise donc `LabInstanceProfile`, et les Flow Logs `LabRole`. Les rôles au moindre privilège restent dans le code et sont créés automatiquement sur un vrai compte (`use_lab_role = false`). |
 | **SQLite** sur volume hôte | Suffisant pour la charge du projet, sans coût ni service à exposer. *Limite :* il n'y a qu'une seule instance (voir §8). |
 
 ### Résilience
@@ -216,6 +217,7 @@ Les règles complètes sont dans [`CONTRIBUTING.md`](CONTRIBUTING.md). En résum
 | Une seule instance, dans une seule AZ | Auto Scaling Group sur 2 AZ derrière un **ALB + ACM + AWS WAF** |
 | SQLite local | **RDS PostgreSQL** Multi-AZ en sous-réseau privé, chiffré, avec sauvegardes automatiques |
 | Pas de sauvegarde automatique du volume | Politique **AWS Backup / DLM** (snapshot quotidien) |
+| `LabRole` imposé par le Learner Lab : ses droits sont plus larges que notre rôle sur mesure | Sur un vrai compte : `use_lab_role = false`, qui active les rôles dédiés (ECR en lecture seule, 2 paramètres SSM, déchiffrement KMS) |
 | Clés AWS de sandbox dans GitLab | Fédération **OIDC GitLab → AWS** (jetons éphémères, aucune clé stockée) |
 | Images de base figées par tag | Épinglage par **digest** + mises à jour automatiques (Renovate) |
 | Images non signées | Signature **Cosign** et vérification au déploiement |
