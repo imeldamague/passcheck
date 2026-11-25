@@ -129,7 +129,7 @@ Le schéma représente le flux logique. Les jobs de reporting utilisent `when: a
 | security | **pip-audit** | CVE des dépendances Python (SCA) | ✅ |
 | security | **trivy fs** | CVE et secrets dans le dépôt | ✅ HIGH/CRITICAL |
 | security | **checkov** | Terraform, Dockerfile et `.gitlab-ci.yml` (IaC) | ✅ |
-| test | **pytest** | 17 tests fonctionnels **et de sécurité** (CSRF, injection SQL, brute force, énumération, hachage…) | ✅ |
+| test | **pytest** | 19 tests fonctionnels **et de sécurité** (CSRF en HTTP et HTTPS, injection SQL, brute force, énumération, hachage…) | ✅ |
 | build | docker | Image construite, taggée avec le **SHA du commit** et poussée dans le registry GitLab | ✅ |
 | image-test | docker | L'image démarre **avec les restrictions de production** (read-only, cap-drop ALL, no-new-privileges), répond sur `/health`, tourne en UID 10001 | ✅ |
 | image-scan | **trivy image** | Rapport JSON de toutes les sévérités + SBOM CycloneDX | ✅ HIGH/CRITICAL avec correctif identifié (`--ignore-unfixed`) |

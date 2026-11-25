@@ -159,7 +159,10 @@ def _register_security_headers(app: Flask) -> None:
             "frame-ancestors 'none'")
         resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["X-Frame-Options"] = "DENY"
-        resp.headers["Referrer-Policy"] = "no-referrer"
+        # same-origin : le Referer n'est envoyé qu'à notre propre site. Flask-WTF
+        # l'exige en HTTPS pour vérifier l'origine des formulaires (anti-CSRF) ;
+        # "no-referrer" bloquait tous les formulaires en production.
+        resp.headers["Referrer-Policy"] = "same-origin"
         resp.headers["Permissions-Policy"] = (
             "camera=(), microphone=(), geolocation=()")
         resp.headers["Cross-Origin-Opener-Policy"] = "same-origin"
