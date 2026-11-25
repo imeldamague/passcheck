@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # ---------- Étape 1 : construction des dépendances ----------
-FROM python:3.12-slim-bookworm AS builder
+FROM python:3.12-slim-trixie AS builder 
 
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /build
@@ -9,7 +9,12 @@ RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-compile -r requirements.txt
 
 # ---------- Étape 2 : image d'exécution minimale ----------
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.12-slim-trixie AS runtime 
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libzstd1=1.5.7+dfsg-1+deb13u1 \
+    && rm -rf /var/lib/apt/lists/*
 
 LABEL org.opencontainers.image.title="passcheck" \
       org.opencontainers.image.description="Verificateur de mots de passe - Challenge DevSecOps"
@@ -38,7 +43,7 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).status == 200 else 1)"]
 
 # Gunicorn (serveur WSGI de production) au lieu du serveur de développement Flask
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "2", \
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "2", \
      "--timeout", "30", "--worker-tmp-dir", "/dev/shm", \
      "--access-logfile", "-", "--forwarded-allow-ips", "*", \
-     "app.main:create_app()"]
+     "--no-control-socket", "app.main:create_app()"]
